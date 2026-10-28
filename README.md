@@ -78,7 +78,7 @@ macFUSE 安装后通常需要重启，并在“系统设置 → 隐私与安全�
 ## 安装
 
 ```bash
-git clone https://github.com/<your-name>/betterSSH.git
+git clone https://github.com/Xiong-SJ/betterSSH.git
 cd betterSSH
 
 make build          # 生成 bin/betterSSH
@@ -377,4 +377,6 @@ make check     # 全量检查
 
 本项目仅用于合法的 SSH 连接与主机配置管理。请遵守目标服务器的访问政策；作者不对滥用承担责任。
 
-本项目未附带特定开源许可证。如需公开分发，请根据你的发布意图补充 `LICENSE` 文件。
+## License
+
+本项目采用 [MIT License](LICENSE) 开源。
