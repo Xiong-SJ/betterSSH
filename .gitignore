@@ -1,0 +1,66 @@
+# 构建产物
+/bin/
+/dist/
+/betterSSH
+*.exe
+*.prof
+
+# 测试二进制与覆盖率产物
+# 注意：*_test.go 是单元测试源码，属于项目代码，应该提交到 GitHub；
+# 这里只忽略测试运行后生成的二进制和覆盖率文件。
+*.test
+*.test.exe
+*.out
+*.coverprofile
+*.cover
+coverage.*
+/test-results/
+/.coverage/
+
+# Go 本地缓存（避免把依赖和构建缓存提交到仓库）
+/.gocache/
+/.gomodcache/
+/.gopath/
+/.cache/
+
+# 编辑器 / IDE
+/.idea/
+/.vscode/
+*.swp
+*.swo
+*~
+
+# 操作系统
+.DS_Store
+._*
+Thumbs.db
+Desktop.ini
+
+# 本地环境变量与凭证（绝对不要提交）
+.env
+.env.*
+*.local
+
+# 本地 SSH 目录 / 凭证
+.ssh/
+.netrc
+known_hosts
+authorized_keys
+*.kdbx
+
+# SSH 私钥、证书及其常见格式
+id_rsa
+id_rsa.*
+id_ed25519
+id_ed25519.*
+id_ecdsa
+id_ecdsa.*
+*.pem
+*.key
+*.p12
+*.pfx
+
+# 配置/日志/临时文件
+*.bak
+*.log
+*.tmp
