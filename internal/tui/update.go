@@ -37,6 +37,10 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.form != nil {
 			m.form.setWidth(m.width)
 		}
+		if m.extraForm != nil {
+			m.extraForm.setWidth(m.width)
+			m.extraForm.setHeight(m.height)
+		}
 		if m.settingsForm != nil {
 			m.settingsForm.setWidth(m.width)
 		}
@@ -53,6 +57,9 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.handleSSHFinished(msg)
 	case unmountedMsg:
 		return m.handleUnmounted(msg)
+	case configCheckedMsg:
+		m.handleConfigChecked(msg)
+		return m, nil
 	case passwordSavedMsg:
 		if msg.err != nil {
 			m.setStatus("保存密码失败："+msg.err.Error(), true)
@@ -92,6 +99,8 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.handleSearchKey(msg)
 	case modeHostForm:
 		return m.handleHostFormKey(msg)
+	case modeExtra:
+		return m.handleExtraKey(msg)
 	case modeSettings:
 		return m.handleSettingsKey(msg)
 	case modePassword:
@@ -233,6 +242,10 @@ func (m *Model) handleHostFormKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		f.err = ""
 		return m, nil
 	case "enter":
+		if f.focus == fieldExtra {
+			m.openExtraEditor()
+			return m, nil
+		}
 		in, password, err := f.collect()
 		if err != nil {
 			f.err = err.Error()
@@ -257,6 +270,9 @@ func (m *Model) handleHostFormKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, m.saveHost(false, 0, in, password)
 	}
+	if f.focus == fieldExtra {
+		return m, nil
+	}
 	if f.focus == fieldPassword && !f.savePassword && msg.Type == tea.KeyRunes {
 		f.savePassword = true
 	}
@@ -264,6 +280,49 @@ func (m *Model) handleHostFormKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	f.inputs[f.focus], cmd = f.inputs[f.focus].Update(msg)
 	f.err = ""
 	return m, cmd
+}
+
+func (m *Model) handleExtraKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	f := m.extraForm
+	if f == nil {
+		m.mode = modeHostForm
+		return m, nil
+	}
+	switch msg.String() {
+	case "esc":
+		m.extraForm = nil
+		m.mode = modeHostForm
+		return m, nil
+	case "ctrl+s":
+		opts, err := config.ParseExtraOptions(f.editor.Value())
+		if err != nil {
+			f.err = err.Error()
+			return m, nil
+		}
+		if m.form != nil {
+			m.form.extras = opts
+			m.form.err = ""
+		}
+		m.extraForm = nil
+		m.mode = modeHostForm
+		return m, nil
+	}
+	var cmd tea.Cmd
+	f.editor, cmd = f.editor.Update(msg)
+	f.err = ""
+	return m, cmd
+}
+
+func (m *Model) openExtraEditor() {
+	if m.form == nil {
+		return
+	}
+	alias := strings.TrimSpace(strings.Join(strings.Fields(m.form.inputs[fieldAlias].Value()), " "))
+	if alias == "" {
+		alias = "（未命名）"
+	}
+	m.extraForm = newExtraForm(alias, m.form.extras, m.width, m.height)
+	m.mode = modeExtra
 }
 
 func (m *Model) handleSettingsKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -318,6 +377,8 @@ func (m *Model) handleSettingsKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		f.mountRoot, cmd = f.mountRoot.Update(msg)
 	case settingRemotePath:
 		f.remotePath, cmd = f.remotePath.Update(msg)
+	case settingTerm:
+		f.term, cmd = f.term.Update(msg)
 	}
 	f.err = ""
 	return m, cmd
@@ -723,6 +784,7 @@ func (m *Model) launchSSH(prep connectPrep) tea.Cmd {
 	} else {
 		cmd.Env = sshutil.WithoutAskPass(os.Environ())
 	}
+	cmd.Env = sshutil.WithTerm(cmd.Env, m.settings.TermOrDefault())
 	m.busy = "连接 " + prep.Alias + "..."
 	banner := ""
 	if prep.WantMount && prep.MountPoint != "" {
@@ -856,22 +918,116 @@ func (m *Model) saveHost(editing bool, index int, in config.HostInput, password 
 	}
 	m.form = nil
 	m.mode = modeList
-	msg := "已保存 Host " + alias
-	if existed {
-		msg += "；备份 " + displayPath(m.cfg.BackupPath())
-	}
-	m.setStatus(msg, false)
+
+	backupPath := m.cfg.BackupPath()
+	key := ""
 	if password != "" {
 		if rowIdx := findConfigIndex(m.cfg, in.Aliases); rowIdx >= 0 {
 			if resolved, err := m.cfg.Resolve(rowIdx); err == nil {
-				key := keyring.Key(resolved.User, resolved.HostName, resolved.Port)
-				m.setStatus("Host 已保存，正在保存密码到系统钥匙串...", false)
-				return m.storePasswordCmd(key, password)
+				key = keyring.Key(resolved.User, resolved.HostName, resolved.Port)
 			}
 		}
-		m.setStatus("Host 已保存，但无法定位密码 key，密码未保存", true)
 	}
-	return nil
+	msg := "已保存 Host " + alias
+	if existed {
+		msg += "；备份 " + displayPath(backupPath)
+	}
+	pending := msg + "，正在校验配置..."
+	if password != "" {
+		if key == "" {
+			pending = msg + "，但无法定位密码 key，密码未保存；正在校验配置..."
+		} else {
+			pending = msg + "，正在校验配置并保存密码..."
+		}
+	}
+	m.setStatus(pending, password != "" && key == "")
+	return m.configCheckCmd(alias, existed, backupPath, key, password)
+}
+
+// configCheckCmd validates the written file with `ssh -G` and stores the
+// password for the same save. Both are external side effects and therefore run
+// off the Update goroutine.
+func (m *Model) configCheckCmd(alias string, existed bool, backupPath, key, password string) tea.Cmd {
+	configPath := m.ConfigPath
+	store := m.Store
+	checkFn := m.checkConfig
+	hadPassword := password != ""
+	return func() tea.Msg {
+		passed, check := checkFn(configPath, alias)
+		msg := configCheckedMsg{
+			alias:       alias,
+			existed:     existed,
+			backupPath:  backupPath,
+			passed:      passed,
+			check:       check,
+			hadPassword: hadPassword,
+			passwordKey: key,
+		}
+		if hadPassword && key != "" {
+			if err := store.Set(key, password); err != nil {
+				msg.passwordErr = err
+			} else {
+				msg.passwordSet = true
+			}
+		}
+		return msg
+	}
+}
+
+// checkConfig asks OpenSSH to parse the on-disk config. It never connects.
+// A missing ssh binary is not treated as a save failure.
+func checkConfig(configPath, alias string) (bool, string) {
+	if strings.TrimSpace(configPath) == "" {
+		return true, "跳过 OpenSSH 校验（配置路径未知）"
+	}
+	sshPath, err := exec.LookPath("ssh")
+	if err != nil {
+		return true, "未找到 ssh，跳过 OpenSSH 校验"
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := sshutil.CheckConfig(ctx, sshPath, configPath, alias); err != nil {
+		return false, "OpenSSH 校验失败：" + err.Error()
+	}
+	return true, "OpenSSH 校验通过"
+}
+
+func (m *Model) handleConfigChecked(c configCheckedMsg) {
+	status := "已保存 Host " + c.alias
+	if c.existed {
+		status += "；备份 " + displayPath(c.backupPath)
+	}
+	status += "；" + c.check
+	passwordNote := ""
+	if c.hadPassword {
+		switch {
+		case c.passwordSet:
+			passwordNote = "密码已保存到系统钥匙串"
+		case c.passwordErr != nil:
+			passwordNote = "保存密码失败：" + c.passwordErr.Error()
+		default:
+			passwordNote = "无法定位密码 key，密码未保存"
+		}
+		status += "；" + passwordNote
+	}
+	isErr := !c.passed || (c.hadPassword && !c.passwordSet)
+	if !c.passed {
+		body := c.check
+		if passwordNote != "" {
+			body += "\n\n" + passwordNote
+		}
+		hint := "配置已写入。"
+		if c.existed {
+			hint += "写前备份位于 " + displayPath(c.backupPath) + "。"
+		}
+		hint += "关闭后按 e 修正并重试。"
+		if c.passwordSet {
+			hint += " 密码已保存在系统钥匙串。"
+		}
+		m.showError("配置已保存，但 OpenSSH 校验失败", body, hint)
+		return
+	}
+	m.setStatus(status, isErr)
 }
 
 func (m *Model) openSettings() {
@@ -1045,8 +1201,12 @@ func (m *Model) forwardInput(msg tea.Msg) tea.Cmd {
 	case modeSearch:
 		m.search, cmd = m.search.Update(msg)
 	case modeHostForm:
-		if m.form != nil {
+		if m.form != nil && m.form.focus != fieldExtra {
 			m.form.inputs[m.form.focus], cmd = m.form.inputs[m.form.focus].Update(msg)
+		}
+	case modeExtra:
+		if m.extraForm != nil {
+			m.extraForm.editor, cmd = m.extraForm.editor.Update(msg)
 		}
 	case modeSettings:
 		if m.settingsForm != nil {
@@ -1055,6 +1215,8 @@ func (m *Model) forwardInput(msg tea.Msg) tea.Cmd {
 				m.settingsForm.mountRoot, cmd = m.settingsForm.mountRoot.Update(msg)
 			case settingRemotePath:
 				m.settingsForm.remotePath, cmd = m.settingsForm.remotePath.Update(msg)
+			case settingTerm:
+				m.settingsForm.term, cmd = m.settingsForm.term.Update(msg)
 			}
 		}
 	case modePassword:

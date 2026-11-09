@@ -84,6 +84,9 @@ func newTestModel(t *testing.T) (*Model, *fakeStore, string) {
 		Store:            store,
 		AskPassSupported: true,
 		SSHVersion:       "OpenSSH_9.6p1",
+		CheckConfig: func(string, string) (bool, string) {
+			return true, "OpenSSH 校验通过"
+		},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -101,6 +104,8 @@ func key(s string) tea.KeyMsg {
 		return tea.KeyMsg{Type: tea.KeyEsc}
 	case "tab":
 		return tea.KeyMsg{Type: tea.KeyTab}
+	case "ctrl+s":
+		return tea.KeyMsg{Type: tea.KeyCtrlS}
 	default:
 		return tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(s)}
 	}
@@ -205,6 +210,91 @@ func TestEditHostPreservesUnknownAndComments(t *testing.T) {
 	}
 	if _, err := os.Stat(path + ".bak"); err != nil {
 		t.Fatal("backup missing after edit")
+	}
+}
+
+func TestExtraOptionEditorSaves(t *testing.T) {
+	m, _, path := newTestModel(t)
+	m.Update(key("e"))
+	if m.mode != modeHostForm || m.form == nil {
+		t.Fatalf("mode = %v form=%v", m.mode, m.form)
+	}
+	m.form.setFocus(fieldExtra)
+	m.Update(key("enter"))
+	if m.mode != modeExtra || m.extraForm == nil {
+		t.Fatalf("extra editor not opened: mode=%v form=%v", m.mode, m.extraForm)
+	}
+	if !strings.Contains(m.extraForm.editor.Value(), "LocalForward 8080 localhost:80") {
+		t.Fatalf("existing extra not loaded into editor: %q", m.extraForm.editor.Value())
+	}
+	m.extraForm.editor.SetValue(m.extraForm.editor.Value() + "\nCompression yes\nForwardAgent no")
+	m.Update(key("ctrl+s"))
+	if m.mode != modeHostForm || len(m.form.extras) != 3 {
+		t.Fatalf("extra apply failed: mode=%v extras=%+v", m.mode, m.form.extras)
+	}
+	m.form.setFocus(fieldPassword)
+	m.Update(key("enter"))
+	if m.mode != modeConfirm {
+		t.Fatalf("editing should require confirmation, mode=%v", m.mode)
+	}
+	m.Update(key("enter"))
+	if m.mode != modeList {
+		t.Fatalf("mode after save = %v (status=%q)", m.mode, m.status)
+	}
+	data, _ := os.ReadFile(path)
+	got := string(data)
+	for _, want := range []string{"Compression yes", "ForwardAgent no", "LocalForward 8080 localhost:80", "# unknown stays"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("missing %q after extra edit:\n%s", want, got)
+		}
+	}
+}
+
+func TestExtraOptionEditorRejectsManagedKey(t *testing.T) {
+	m, _, _ := newTestModel(t)
+	m.Update(key("e"))
+	m.form.setFocus(fieldExtra)
+	m.Update(key("enter"))
+	m.extraForm.editor.SetValue("HostName other.example")
+	m.Update(key("ctrl+s"))
+	if m.mode != modeExtra || m.extraForm == nil {
+		t.Fatalf("invalid extras should keep editor open, mode=%v", m.mode)
+	}
+	if m.extraForm.err == "" {
+		t.Fatal("expected validation error")
+	}
+	m.Update(key("esc"))
+	if m.mode != modeHostForm {
+		t.Fatalf("esc mode = %v", m.mode)
+	}
+}
+
+func TestSaveHostReportsCheckFailure(t *testing.T) {
+	m, _, path := newTestModel(t)
+	m.checkConfig = func(string, string) (bool, string) {
+		return false, "OpenSSH 校验失败：Bad yes/no argument: maybe"
+	}
+	m.Update(key("e"))
+	m.Update(key("enter")) // overwrite confirmation
+	if m.mode != modeConfirm {
+		t.Fatalf("mode = %v, want confirm", m.mode)
+	}
+	_, cmd := m.Update(key("enter"))
+	if cmd == nil {
+		t.Fatal("expected config check command")
+	}
+	m.Update(cmd())
+	if m.mode != modeError || m.errDialog == nil {
+		t.Fatalf("mode=%v dialog=%v, want check error", m.mode, m.errDialog)
+	}
+	if !strings.Contains(m.errDialog.Title, "OpenSSH 校验失败") {
+		t.Fatalf("unexpected dialog title: %q", m.errDialog.Title)
+	}
+	if !strings.Contains(m.errDialog.Hint, "配置已写入") {
+		t.Fatalf("missing backup hint: %q", m.errDialog.Hint)
+	}
+	if data, err := os.ReadFile(path); err != nil || !strings.Contains(string(data), "Host alpha") {
+		t.Fatalf("config not written despite check failure: %v\n%s", err, data)
 	}
 }
 
@@ -338,6 +428,17 @@ func TestSettingsKeyboardEditing(t *testing.T) {
 		t.Fatalf("space not inserted into mount root: %q", got)
 	}
 	m.Update(key("tab")) // remote path
+	if m.settingsForm.focus != settingRemotePath {
+		t.Fatalf("focus = %d", m.settingsForm.focus)
+	}
+	m.Update(key("tab")) // default TERM
+	if m.settingsForm.focus != settingTerm {
+		t.Fatalf("focus = %d", m.settingsForm.focus)
+	}
+	m.Update(key("x"))
+	if !strings.HasSuffix(m.settingsForm.term.Value(), "x") {
+		t.Fatalf("term input = %q", m.settingsForm.term.Value())
+	}
 	m.Update(key("tab")) // default action
 	if m.settingsForm.focus != settingDefaultAction {
 		t.Fatalf("focus = %d", m.settingsForm.focus)
@@ -354,6 +455,45 @@ func TestSettingsKeyboardEditing(t *testing.T) {
 	m.Update(key(" "))
 	if !m.settingsForm.draft.AutoUnmount {
 		t.Fatal("auto unmount not toggled")
+	}
+}
+
+func TestSettingsRejectsInvalidTerm(t *testing.T) {
+	m, _, _ := newTestModel(t)
+	m.Update(key("s"))
+	m.settingsForm.setFocus(settingTerm)
+	m.settingsForm.term.SetValue("xterm 256")
+	m.Update(key("enter"))
+	if m.mode != modeSettings {
+		t.Fatalf("mode = %v", m.mode)
+	}
+	if m.settingsForm.err == "" || !strings.Contains(m.settingsForm.err, "invalid term") {
+		t.Fatalf("err = %q", m.settingsForm.err)
+	}
+}
+
+func TestSettingsTermSaved(t *testing.T) {
+	m, _, _ := newTestModel(t)
+	m.Update(key("s"))
+	m.settingsForm.setFocus(settingTerm)
+	m.settingsForm.term.SetValue("screen-256color")
+	m.Update(key("enter"))
+	if m.mode != modeConfirm {
+		t.Fatalf("mode = %v", m.mode)
+	}
+	m.Update(key("enter"))
+	if m.mode != modeList {
+		t.Fatalf("mode = %v", m.mode)
+	}
+	if m.settings.Term != "screen-256color" {
+		t.Fatalf("term = %q", m.settings.Term)
+	}
+	got, err := settings.Load(m.SettingsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Term != "screen-256color" {
+		t.Fatalf("loaded term = %q", got.Term)
 	}
 }
 

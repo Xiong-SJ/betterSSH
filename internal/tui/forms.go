@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/charmbracelet/bubbles/textarea"
 	"github.com/charmbracelet/bubbles/textinput"
 
 	"betterSSH/internal/config"
@@ -18,6 +19,7 @@ const (
 	fieldIdentity
 	fieldProxyJump
 	fieldAlive
+	fieldExtra
 	fieldPassword
 	hostFieldCount
 )
@@ -30,19 +32,23 @@ type hostForm struct {
 	savePassword bool
 	err          string
 	inherited    config.ResolvedHost
+	extras       []config.ExtraOption
 }
 
 func newHostForm(in config.HostInput, editing bool, index int, inherited config.ResolvedHost, width int) *hostForm {
 	placeholders := []string{
 		"例如: prod-web（空格分隔可多个）", inherited.HostName, inherited.User,
 		fmt.Sprintf("%d", inherited.Port), inherited.IdentityFile, inherited.ProxyJump,
-		inherited.ServerAliveInterval, "输入密码后按 Ctrl+S 启用保存",
+		inherited.ServerAliveInterval, "按 Enter 编辑额外配置", "输入密码后按 Ctrl+S 启用保存",
 	}
 	values := []string{
 		strings.Join(in.Aliases, " "), in.HostName, in.User, in.Port,
-		in.IdentityFile, in.ProxyJump, in.ServerAliveInterval, "",
+		in.IdentityFile, in.ProxyJump, in.ServerAliveInterval, "", "",
 	}
-	f := &hostForm{editing: editing, index: index, inherited: inherited}
+	f := &hostForm{
+		editing: editing, index: index, inherited: inherited,
+		extras: append([]config.ExtraOption(nil), in.Extra...),
+	}
 	f.inputs = make([]textinput.Model, hostFieldCount)
 	for i := range f.inputs {
 		ti := textinput.New()
@@ -106,6 +112,7 @@ func (f *hostForm) collect() (config.HostInput, string, error) {
 		IdentityFile:        strings.TrimSpace(f.inputs[fieldIdentity].Value()),
 		ProxyJump:           strings.TrimSpace(f.inputs[fieldProxyJump].Value()),
 		ServerAliveInterval: strings.TrimSpace(f.inputs[fieldAlive].Value()),
+		Extra:               append([]config.ExtraOption(nil), f.extras...),
 	}
 	if err := config.ValidateInput(&in); err != nil {
 		return in, "", err
@@ -120,9 +127,39 @@ func (f *hostForm) collect() (config.HostInput, string, error) {
 	return in, password, nil
 }
 
+// extraForm edits the free-form directives of one Host block. Each line is a
+// complete "Directive Value" pair; comments are intentionally not edited here.
+type extraForm struct {
+	alias  string
+	editor textarea.Model
+	err    string
+}
+
+func newExtraForm(alias string, opts []config.ExtraOption, width, height int) *extraForm {
+	ta := textarea.New()
+	ta.Prompt = ""
+	ta.Placeholder = "Compression yes\nTCPKeepAlive yes\nLocalForward 8080 localhost:80"
+	ta.ShowLineNumbers = false
+	ta.CharLimit = 8192
+	ta.SetValue(config.FormatExtraOptions(opts))
+	ta.SetWidth(clamp(width-8, 30, 100))
+	ta.SetHeight(clamp(height-14, 6, 16))
+	ta.Focus()
+	return &extraForm{alias: alias, editor: ta}
+}
+
+func (f *extraForm) setWidth(width int) {
+	f.editor.SetWidth(clamp(width-8, 30, 100))
+}
+
+func (f *extraForm) setHeight(height int) {
+	f.editor.SetHeight(clamp(height-14, 6, 16))
+}
+
 const (
 	settingMountRoot = iota
 	settingRemotePath
+	settingTerm
 	settingDefaultAction
 	settingOnMounted
 	settingAutoUnmount
@@ -134,6 +171,7 @@ type settingsForm struct {
 	draft      settings.Settings
 	mountRoot  textinput.Model
 	remotePath textinput.Model
+	term       textinput.Model
 	focus      int
 	err        string
 }
@@ -150,6 +188,12 @@ func newSettingsForm(st settings.Settings, width int) *settingsForm {
 	f.remotePath.SetValue(st.RemotePath)
 	f.remotePath.CharLimit = 512
 	f.remotePath.Width = clamp(width-22, 20, 80)
+	f.term = textinput.New()
+	f.term.Prompt = ""
+	f.term.Placeholder = settings.DefaultTerm
+	f.term.SetValue(st.Term)
+	f.term.CharLimit = 64
+	f.term.Width = clamp(width-22, 20, 80)
 	f.setFocus(0)
 	return f
 }
@@ -158,6 +202,7 @@ func (f *settingsForm) setWidth(width int) {
 	w := clamp(width-22, 20, 80)
 	f.mountRoot.Width = w
 	f.remotePath.Width = w
+	f.term.Width = w
 }
 
 func (f *settingsForm) setFocus(i int) {
@@ -177,6 +222,11 @@ func (f *settingsForm) setFocus(i int) {
 		f.remotePath.Focus()
 	} else {
 		f.remotePath.Blur()
+	}
+	if i == settingTerm {
+		f.term.Focus()
+	} else {
+		f.term.Blur()
 	}
 }
 
@@ -213,6 +263,7 @@ func (f *settingsForm) toggle() {
 func (f *settingsForm) collect() (settings.Settings, error) {
 	f.draft.MountRoot = strings.TrimSpace(f.mountRoot.Value())
 	f.draft.RemotePath = strings.TrimSpace(f.remotePath.Value())
+	f.draft.Term = strings.TrimSpace(f.term.Value())
 	if err := f.draft.Validate(); err != nil {
 		return f.draft, err
 	}

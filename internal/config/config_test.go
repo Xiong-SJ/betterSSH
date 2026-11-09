@@ -282,6 +282,135 @@ func TestValidateInput(t *testing.T) {
 	}
 }
 
+func TestExtraOptionsFromAndUpdateHost(t *testing.T) {
+	src := `Host alpha
+    HostName alpha.example
+    Compression no
+    LocalForward 8080 localhost:80 # keep
+    WeirdOption old
+`
+	f, err := Parse("config", []byte(src))
+	if err != nil {
+		t.Fatal(err)
+	}
+	in := InputFromHost(f.Hosts[0])
+	if len(in.Extra) != 3 {
+		t.Fatalf("extra = %+v, want 3", in.Extra)
+	}
+	if in.Extra[0].Key != "Compression" || in.Extra[2].Value != "old" {
+		t.Fatalf("unexpected extras: %+v", in.Extra)
+	}
+	in.Extra = []ExtraOption{
+		{Key: "Compression", Value: "yes", Comment: "# tuned"},
+		{Key: "LocalForward", Value: "8080 localhost:80", Comment: "# keep"},
+	}
+	if err := f.UpdateHost(0, in); err != nil {
+		t.Fatal(err)
+	}
+	got := string(f.Render())
+	for _, want := range []string{
+		"Compression yes # tuned",
+		"LocalForward 8080 localhost:80 # keep",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("updated config missing %q:\n%s", want, got)
+		}
+	}
+	if strings.Contains(got, "WeirdOption") {
+		t.Errorf("removed extra still present:\n%s", got)
+	}
+
+	in = InputFromHost(f.Hosts[0])
+	in.Extra = append(in.Extra, ExtraOption{Key: "ForwardAgent", Value: "yes"})
+	if err := f.UpdateHost(0, in); err != nil {
+		t.Fatal(err)
+	}
+	if got := string(f.Render()); !strings.Contains(got, "ForwardAgent yes") {
+		t.Fatalf("new extra not appended:\n%s", got)
+	}
+}
+
+func TestParseExtraOptions(t *testing.T) {
+	opts, err := ParseExtraOptions("\nCompression yes # note\n  LocalForward 8080 localhost:80  \n\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(opts) != 2 {
+		t.Fatalf("got %d options, want 2: %+v", len(opts), opts)
+	}
+	if opts[0].Comment != "# note" || opts[1].Value != "8080 localhost:80" {
+		t.Fatalf("parsed options = %+v", opts)
+	}
+	bad := []string{
+		"# full line comment",
+		"HostName other.example",
+		"Host *",
+		"Compression",
+		"1Invalid yes",
+		"Compression yes\nHostName other.example",
+	}
+	for _, text := range bad {
+		if _, err := ParseExtraOptions(text); err == nil {
+			t.Errorf("ParseExtraOptions(%q) should fail", text)
+		}
+	}
+}
+
+func TestAddHostWithExtraOptions(t *testing.T) {
+	f, err := Parse("config", []byte("Host alpha\n    User alice\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = f.AddHost(HostInput{
+		Aliases:  []string{"delta"},
+		HostName: "delta.example",
+		Extra: []ExtraOption{
+			{Key: "Compression", Value: "yes"},
+			{Key: "LocalForward", Value: "9000 localhost:9000"},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := string(f.Render())
+	for _, want := range []string{"Host delta", "HostName delta.example", "Compression yes", "LocalForward 9000 localhost:9000"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("new host missing %q:\n%s", want, got)
+		}
+	}
+}
+
+func TestValidateInputExtraOptions(t *testing.T) {
+	valid := HostInput{
+		Aliases: []string{"ok"},
+		Extra: []ExtraOption{
+			{Key: "  Compression ", Value: " yes ", Comment: " # note "},
+			{Key: "LocalForward", Value: "8080 localhost:80"},
+		},
+	}
+	if err := ValidateInput(&valid); err != nil {
+		t.Fatal(err)
+	}
+	if valid.Extra[0].Key != "Compression" || valid.Extra[0].Value != "yes" || valid.Extra[0].Comment != "# note" {
+		t.Fatalf("extras not normalized: %+v", valid.Extra)
+	}
+	bad := []ExtraOption{
+		{Key: "", Value: "yes"},
+		{Key: "Host", Value: "*"},
+		{Key: "Match", Value: "all"},
+		{Key: "HostName", Value: "other.example"},
+		{Key: "Compression", Value: ""},
+		{Key: "Bad Key", Value: "yes"},
+		{Key: "Compression", Value: "yes", Comment: "note"},
+	}
+	for i, opt := range bad {
+		in := HostInput{Aliases: []string{"ok"}, Extra: []ExtraOption{opt}}
+		if err := ValidateInput(&in); err == nil {
+			t.Errorf("bad extra %d should fail: %+v", i, opt)
+		}
+	}
+}
+
 func TestResolveWildcardDefault(t *testing.T) {
 	f, err := Parse("config", []byte("Host *\n  User wildcard\n  ServerAliveInterval 30\n\nHost delta\n  HostName delta.example\n"))
 	if err != nil {

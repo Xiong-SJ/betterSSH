@@ -64,3 +64,6 @@ id_ecdsa.*
 *.bak
 *.log
 *.tmp
+
+# agent 的产物
+AGENTS.md

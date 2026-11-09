@@ -23,6 +23,7 @@ const (
 	modeList mode = iota
 	modeSearch
 	modeHostForm
+	modeExtra
 	modeSettings
 	modePassword
 	modeConfirm
@@ -68,6 +69,9 @@ type Options struct {
 	AskPassSupported bool
 	SSHVersion       string
 	Dependencies     mount.DependencyReport
+	// CheckConfig validates a written config without connecting. Tests can
+	// replace it; nil uses OpenSSH's `ssh -G`.
+	CheckConfig func(configPath, alias string) (bool, string)
 }
 
 // Model is the complete TUI state.
@@ -84,6 +88,7 @@ type Model struct {
 	sshVersion       string
 	deps             mount.DependencyReport
 	isMounted        func(string) (bool, error)
+	checkConfig      func(configPath, alias string) (bool, string)
 
 	width  int
 	height int
@@ -100,6 +105,7 @@ type Model struct {
 	busy   string
 
 	form         *hostForm
+	extraForm    *extraForm
 	settingsForm *settingsForm
 	password     *passwordForm
 	confirm      *confirmDialog
@@ -145,10 +151,28 @@ type passwordDeletedMsg struct {
 	err   error
 }
 
+// configCheckedMsg is the result of the post-save OpenSSH check. Password
+// storage for the same save is folded into this message so the final status
+// reflects both the config check and the keyring result.
+type configCheckedMsg struct {
+	alias       string
+	existed     bool
+	backupPath  string
+	passed      bool
+	check       string
+	hadPassword bool
+	passwordKey string
+	passwordSet bool
+	passwordErr error
+}
+
 // New loads config and settings and returns an interactive model.
 func New(opts Options) (*Model, error) {
 	if opts.Store == nil {
 		opts.Store = keyring.System{}
+	}
+	if opts.CheckConfig == nil {
+		opts.CheckConfig = checkConfig
 	}
 	cfg, err := config.Load(opts.ConfigPath)
 	if err != nil {
@@ -169,6 +193,7 @@ func New(opts Options) (*Model, error) {
 		sshVersion:       opts.SSHVersion,
 		deps:             opts.Dependencies,
 		isMounted:        mount.IsMounted,
+		checkConfig:      opts.CheckConfig,
 		width:            100,
 		height:           30,
 		mode:             modeList,

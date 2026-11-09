@@ -75,8 +75,19 @@ type File struct {
 	decodeOnce bool
 }
 
+// ExtraOption is a user-supplied directive inside a Host block. It lets the
+// editor manage OpenSSH options that betterSSH does not expose as first-class
+// fields. Key and Value are written verbatim as "Key Value"; Comment keeps an
+// inline comment including its leading '#'.
+type ExtraOption struct {
+	Key     string
+	Value   string
+	Comment string
+}
+
 // HostInput is the editable representation of a Host block. Empty managed
-// fields mean "remove this directive from the block".
+// fields mean "remove this directive from the block". Extra contains all
+// non-managed directives currently present in the block.
 type HostInput struct {
 	Aliases             []string
 	HostName            string
@@ -85,6 +96,7 @@ type HostInput struct {
 	IdentityFile        string
 	ProxyJump           string
 	ServerAliveInterval string
+	Extra               []ExtraOption
 }
 
 // ResolvedHost contains effective SSH settings for an alias. Values inherited
@@ -255,7 +267,57 @@ func InputFromHost(h Host) HostInput {
 		IdentityFile:        h.Field("IdentityFile"),
 		ProxyJump:           h.Field("ProxyJump"),
 		ServerAliveInterval: h.Field("ServerAliveInterval"),
+		Extra:               ExtraFromHost(h),
 	}
+}
+
+// ExtraFromHost returns the directives of h that are not managed by the
+// built-in form fields, in their original order.
+func ExtraFromHost(h Host) []ExtraOption {
+	var out []ExtraOption
+	for _, f := range h.Fields {
+		if isManagedKey(f.Key) {
+			continue
+		}
+		out = append(out, ExtraOption{Key: f.Key, Value: f.Value, Comment: f.Comment})
+	}
+	return out
+}
+
+// FormatExtraOptions renders options as one "Key Value" line per option. It is
+// the inverse of ParseExtraOptions and is used to prefill the TUI editor.
+func FormatExtraOptions(opts []ExtraOption) string {
+	lines := make([]string, 0, len(opts))
+	for _, opt := range opts {
+		lines = append(lines, formatExtraLine("", opt))
+	}
+	return strings.Join(lines, "\n")
+}
+
+// ParseExtraOptions parses the TUI's extra-directive editor. Blank lines are
+// ignored; every other line must be a complete "Key Value" directive. Full-line
+// comments are not supported because comments are preserved separately.
+func ParseExtraOptions(text string) ([]ExtraOption, error) {
+	var out []ExtraOption
+	for i, raw := range strings.Split(text, "\n") {
+		line := strings.TrimSpace(raw)
+		if line == "" {
+			continue
+		}
+		if strings.HasPrefix(line, "#") {
+			return nil, fmt.Errorf("line %d: comments are not supported in extra options", i+1)
+		}
+		key, value, comment, ok := parseDirective(raw)
+		if !ok || strings.TrimSpace(key) == "" {
+			return nil, fmt.Errorf("line %d: expected \"Directive Value\"", i+1)
+		}
+		opt := ExtraOption{Key: key, Value: value, Comment: comment}
+		if err := validateExtraOption(opt); err != nil {
+			return nil, fmt.Errorf("line %d: %w", i+1, err)
+		}
+		out = append(out, opt)
+	}
+	return out, nil
 }
 
 // ValidateInput normalizes and validates user input.
@@ -337,7 +399,88 @@ func ValidateInput(in *HostInput) error {
 			return errors.New("ServerAliveInterval must be an integer between 0 and 86400")
 		}
 	}
+	for i := range in.Extra {
+		in.Extra[i].Key = strings.TrimSpace(in.Extra[i].Key)
+		in.Extra[i].Value = strings.TrimSpace(in.Extra[i].Value)
+		in.Extra[i].Comment = strings.TrimSpace(in.Extra[i].Comment)
+		if err := validateExtraOption(in.Extra[i]); err != nil {
+			return fmt.Errorf("extra option %d: %w", i+1, err)
+		}
+	}
 	return nil
+}
+
+func isManagedKey(key string) bool {
+	for _, managed := range ManagedKeys {
+		if strings.EqualFold(managed, key) {
+			return true
+		}
+	}
+	return false
+}
+
+func validateExtraOption(opt ExtraOption) error {
+	key := strings.TrimSpace(opt.Key)
+	if key == "" {
+		return errors.New("directive name is required")
+	}
+	if strings.ContainsAny(key, " \t=#\"'") {
+		return fmt.Errorf("invalid character in directive name %q", key)
+	}
+	for i, r := range key {
+		if i == 0 {
+			if !unicode.IsLetter(r) {
+				return fmt.Errorf("directive name %q must start with a letter", key)
+			}
+			continue
+		}
+		if !unicode.IsLetter(r) && !unicode.IsDigit(r) {
+			return fmt.Errorf("invalid character in directive name %q", key)
+		}
+	}
+	switch strings.ToLower(key) {
+	case "host", "match":
+		return fmt.Errorf("%s is not allowed inside a Host block", key)
+	}
+	if isManagedKey(key) {
+		return fmt.Errorf("%s must be edited with its dedicated field", key)
+	}
+	if strings.TrimSpace(opt.Value) == "" {
+		return fmt.Errorf("%s requires a value", key)
+	}
+	if strings.ContainsAny(opt.Value, "\x00\n\r") {
+		return fmt.Errorf("%s contains a newline or NUL byte", key)
+	}
+	if opt.Comment != "" && !strings.HasPrefix(strings.TrimSpace(opt.Comment), "#") {
+		return fmt.Errorf("comment for %s must start with '#'", key)
+	}
+	return nil
+}
+
+func formatExtraLine(indent string, opt ExtraOption) string {
+	line := indent + opt.Key
+	if opt.Value != "" {
+		line += " " + opt.Value
+	}
+	if opt.Comment != "" {
+		line += " " + opt.Comment
+	}
+	return line
+}
+
+func sameExtra(f Field, opt ExtraOption) bool {
+	return strings.EqualFold(f.Key, opt.Key) &&
+		f.Value == opt.Value && f.Comment == opt.Comment
+}
+
+func extraFields(h Host) []Field {
+	var out []Field
+	for _, f := range h.Fields {
+		if !isManagedKey(f.Key) {
+			out = append(out, f)
+		}
+	}
+	return out
 }
 
 // AddHost appends a new Host block.
@@ -356,6 +499,9 @@ func (f *File) AddHost(in HostInput) error {
 		if v := inputValue(in, key); v != "" {
 			f.Lines = append(f.Lines, "    "+key+" "+formatValue(v))
 		}
+	}
+	for _, opt := range in.Extra {
+		f.Lines = append(f.Lines, formatExtraLine("    ", opt))
 	}
 	f.hadFinalNewline = true
 	f.reindex()
@@ -409,6 +555,22 @@ func (f *File) UpdateHost(index int, in HostInput) error {
 			line += " " + fld.Comment
 		}
 		replace[fld.Line] = line
+	}
+
+	existing := extraFields(h)
+	for i, opt := range in.Extra {
+		if i < len(existing) {
+			fld := existing[i]
+			if sameExtra(fld, opt) {
+				continue
+			}
+			replace[fld.Line] = formatExtraLine(fld.Indent, opt)
+			continue
+		}
+		inserts = append(inserts, formatExtraLine("    ", opt))
+	}
+	for i := len(in.Extra); i < len(existing); i++ {
+		remove[existing[i].Line] = true
 	}
 
 	insertAt := h.End

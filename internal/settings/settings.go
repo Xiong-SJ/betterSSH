@@ -24,6 +24,9 @@ const (
 	OnMountedUnmount = "unmount"
 	// OnMountedUse reuses the existing mount.
 	OnMountedUse = "use"
+
+	// DefaultTerm is the terminal type injected into ssh sessions.
+	DefaultTerm = "xterm-256color"
 )
 
 // Settings are user preferences. Per-host mount_points and remote_paths maps
@@ -32,6 +35,7 @@ type Settings struct {
 	Version       int               `json:"version"`
 	MountRoot     string            `json:"mount_root"`
 	RemotePath    string            `json:"remote_path"`
+	Term          string            `json:"term"`
 	DefaultAction string            `json:"default_action"`
 	OnMounted     string            `json:"on_mounted"`
 	AutoUnmount   bool              `json:"auto_unmount"`
@@ -46,6 +50,7 @@ func Default() Settings {
 		Version:       1,
 		MountRoot:     "~/sshfs",
 		RemotePath:    "/",
+		Term:          DefaultTerm,
 		DefaultAction: ActionConnect,
 		OnMounted:     OnMountedAsk,
 		MountPoints:   map[string]string{},
@@ -163,6 +168,14 @@ func (s Settings) RemotePathFor(alias string) string {
 	return "/"
 }
 
+// TermOrDefault returns the configured TERM, falling back to DefaultTerm.
+func (s Settings) TermOrDefault() string {
+	if term := strings.TrimSpace(s.Term); term != "" {
+		return term
+	}
+	return DefaultTerm
+}
+
 // Validate checks enum values and required paths.
 func (s *Settings) Validate() error {
 	switch s.DefaultAction {
@@ -181,6 +194,18 @@ func (s *Settings) Validate() error {
 	if strings.TrimSpace(s.RemotePath) == "" {
 		return errors.New("remote_path must not be empty")
 	}
+	s.Term = strings.TrimSpace(s.Term)
+	if s.Term == "" {
+		return errors.New("term must not be empty")
+	}
+	if len(s.Term) > 64 {
+		return errors.New("term must be at most 64 characters")
+	}
+	for _, r := range s.Term {
+		if r < 0x21 || r > 0x7e {
+			return fmt.Errorf("invalid term %q", s.Term)
+		}
+	}
 	return nil
 }
 
@@ -194,6 +219,10 @@ func (s *Settings) applyDefaults() {
 	}
 	if strings.TrimSpace(s.RemotePath) == "" {
 		s.RemotePath = d.RemotePath
+	}
+	s.Term = strings.TrimSpace(s.Term)
+	if s.Term == "" {
+		s.Term = d.Term
 	}
 	if s.DefaultAction == "" {
 		s.DefaultAction = d.DefaultAction

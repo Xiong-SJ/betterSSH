@@ -25,7 +25,9 @@
 - 删除 Host 时自动删除其对应的系统钥匙串密码。
 - 写回采用块级更新，保留注释、空行、顺序、未知字段和未管理字段。
 - 写回前生成 `config.bak`，使用同目录临时文件 + 原子替换；检测到文件被其他程序修改时拒绝覆盖。
-- 编辑字段：`HostName`、`User`、`Port`、`IdentityFile`、`ProxyJump`、`ServerAliveInterval`。
+- 编辑常用字段：`HostName`、`User`、`Port`、`IdentityFile`、`ProxyJump`、`ServerAliveInterval`。
+- 编辑表单提供“额外配置”编辑器，可按行添加任意 OpenSSH 指令（如 `Compression yes`、`LocalForward 8080 localhost:80`）；保存后用 `ssh -G` 校验配置文件，失败时弹窗提示并保留 `config.bak`。
+- 启动 SSH 时注入设置中的默认 `TERM`（默认 `xterm-256color`，可在设置中修改）；已有 `TERM` 会被替换，不会重复追加。
 - 主界面显示选中 Host 的本机挂载点和远程路径。
 - sshfs 挂载后启动原生 `ssh <alias>`；支持严格挂载模式、已挂载处理、手动/自动卸载。
 - SSH 退出后询问“继续保留挂载 / 卸载并释放”；可通过设置自动卸载。
@@ -167,7 +169,10 @@ betterSSH remove beta --yes
 
 ```text
 --hostname  --user  --port  --identity-file  --proxy-jump  --server-alive
+--option 'Key Value'   # 可重复，追加任意 OpenSSH 指令
 ```
+
+`edit` 的 `--option` 会追加到该 Host 块末尾，不会替换已有同名字段；需要修改已有额外指令时，请在 TUI 的“额外配置”编辑器中编辑。空 `--option` 会被拒绝。
 
 CLI 行为说明：
 
@@ -181,6 +186,8 @@ CLI 行为说明：
 - `remove` 会在删除 Host 后自动删除对应系统钥匙串密码；删除失败会保留 Host 已删除的结果并报告 key 和错误。
 - 密码不接受任何 CLI 参数。CLI 的 `connect` / `mount` 会复用系统钥匙串中的密码，并通过 AskPass 自动填充；保存密码仍通过 TUI 的 `p` 或编辑表单完成。
 - CLI 操作同样遵守 `config.bak` 备份和外部修改检测。
+- `add` / `edit` 写盘后会执行 `ssh -G -F <config> <alias>` 做只解析、不连接的语法校验；校验失败时配置仍已写入，命令以警告形式提示并给出备份路径，退出码保持不变。
+- `connect` 启动的 `ssh` 进程环境包含 settings 中的 `term`（默认 `xterm-256color`，会替换调用者原有的 `TERM`）。
 
 ## TUI 快捷键
 
@@ -192,7 +199,7 @@ CLI 行为说明：
 | `n` | 新建 Host |
 | `d` | 删除 Host 及其钥匙串密码（二次确认） |
 | `u` | 卸载选中 Host 的挂载点（二次确认） |
-| `s` | 设置 |
+| `s` | 设置（含挂载、连接动作与默认 `TERM`） |
 | `p` | 保存密码到系统钥匙串（输入 + 写入确认） |
 | `x` | 删除已保存密码（二次确认） |
 | `/` | 模糊搜索；`Esc` 清除，`Enter` 保留过滤结果 |
@@ -200,6 +207,8 @@ CLI 行为说明：
 | `?` | 帮助、依赖检查、安全说明 |
 | SSH 退出后 | `Enter`/`k` 继续保留挂载，`u` 卸载并释放，`Esc` 保持现状 |
 | `q` / `Ctrl+C` | 退出 |
+
+编辑 Host 时，表单中的“额外配置”行按 `Enter` 进入多行编辑器：每行写一条 `Key Value`，`#` 后的内容作为行内注释；`Ctrl+S` 应用并返回表单，`Esc` 放弃本次额外配置修改。保存 Host 后会显示 OpenSSH 校验结果；校验失败会弹窗，但已写入的文件和 `config.bak` 都会保留；关闭提示后按 `e` 修正。
 
 很多终端无法区分 `Ctrl+M` 与 `Enter`（两者都是 CR），因此强制挂载请使用无歧义的 `m`。`Enter` 的行为可在设置里切换：
 
@@ -222,7 +231,7 @@ CLI 行为说明：
      -o reconnect -o ServerAliveInterval=15
    ```
 
-6. 挂载成功后执行原生 `ssh <alias>`，将终端控制权完整交给 OpenSSH。
+6. 挂载成功后执行原生 `ssh <alias>`，将终端控制权完整交给 OpenSSH；进程环境包含设置中的 `term`（默认 `xterm-256color`）。
 7. SSH 会话退出后：
    - TUI 默认弹窗询问继续保留还是卸载；
    - CLI 默认保留并打印卸载命令，`--unmount-after` 或 `auto_unmount=true` 自动卸载。
@@ -239,6 +248,7 @@ CLI 行为说明：
   "version": 1,
   "mount_root": "~/sshfs",
   "remote_path": "/",
+  "term": "xterm-256color",
   "default_action": "connect",
   "on_mounted": "ask",
   "auto_unmount": false,
@@ -253,6 +263,7 @@ CLI 行为说明：
 ```
 
 - `mount_root` 支持 `~` 和 `{alias}` 占位符，例如 `/mnt/{alias}`。
+- `term`：启动 `ssh` 时注入的 `TERM` 值，默认 `xterm-256color`；可在 TUI 的 `s` 设置中直接修改。只允许可打印 ASCII、最长 64 字符。
 - `mount_points` / `remote_paths` 为按 Host 别名覆盖；目前通过编辑 JSON 配置。
 - `default_action`：`connect` 或 `mount-connect`。
 - `on_mounted`：`ask` / `unmount` / `use`。
@@ -344,8 +355,9 @@ make check     # 全量检查
 
 - config 解析、注释/未知字段保留、CRLF、备份、外部修改拒绝、通配默认值解析。
 - keyring key 生成。
-- ssh/sshfs 参数、IPv6、AskPass 环境、AskPass 模式、版本解析。
-- settings 默认值、持久化、挂载点计算。
+- ssh/sshfs 参数、IPv6、AskPass 环境、AskPass 模式、版本解析、`TERM` 注入与 `ssh -G` 校验。
+- 额外配置的解析、校验、保留性写回，以及 TUI 编辑器与 CLI `--option`。
+- settings 默认值、持久化、`TERM` 校验与回退、挂载点计算。
 - mount 挂载表解析、安全校验、Linux 卸载回退。
 - TUI 列表过滤、删除确认、编辑覆盖确认、密码保存、搜索、SSH 退出后的挂载保留/卸载分支。
 - CLI 参数解析、add/edit/remove、show、未挂载状态、`--yes` 确认和各子命令退出码。
@@ -354,7 +366,10 @@ make check     # 全量检查
 
 - `Include` 引入的 Host 不会展开列出或编辑；`Match` 块会被原样保留但不在 TUI 中展示。
 - 通配 Host（如 `Host *`、`Host *.example`）会被保留，但不会作为连接目标列出。
-- TUI 只管理常用字段；其他字段原样保留。重复的受管字段只更新第一条，清空字段会删除该字段的所有重复行。
+- TUI 的常用字段由结构化表单管理；其他指令在“额外配置”编辑器中按行编辑，未修改的行保持原字节。重复的受管字段只更新第一条，清空字段会删除该字段的所有重复行。
+- 额外配置每行一条指令，值中的 `#` 需要按 OpenSSH 规则加引号，否则会被当作行内注释。
+- 保存后的校验只调用 `ssh -G` 检查配置语法和解析结果，不验证网络可达性、主机密钥或登录权限。
+- `ssh -G` 会按 OpenSSH 语义求值 `Match`；若配置包含 `Match exec`，该命令会在校验时执行（与正常 SSH 读取配置的行为一致）。
 - `config.bak` 每次写回覆盖为最近一次写前备份；不保存历史版本。
 - 配置为符号链接时，写入符号链接目标；备份生成在链接路径旁（`<链接路径>.bak`）。
 - 密码 key 基于 User + HostName + Port。修改这三项后旧钥匙串记录不会自动迁移，需要按 `x` 删除旧的、按 `p` 重新保存。

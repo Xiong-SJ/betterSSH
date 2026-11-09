@@ -165,6 +165,10 @@ Quick connect examples:
 
 Host field flags for add/edit:
   --hostname, --user, --port, --identity-file, --proxy-jump, --server-alive
+  --option 'Key Value'              Append an extra SSH directive (repeatable)
+
+Connection environment:
+  ssh runs with TERM from settings (default xterm-256color).
 
 Safety:
   edit/remove/unmount ask for confirmation; add --yes for scripts.

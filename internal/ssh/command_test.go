@@ -99,6 +99,27 @@ func TestAskPassEnvironmentHasNoPassword(t *testing.T) {
 	}
 }
 
+func TestWithTerm(t *testing.T) {
+	cases := []struct {
+		name string
+		base []string
+		term string
+		want []string
+	}{
+		{"replace", []string{"HOME=/tmp", "TERM=screen"}, DefaultTerm, []string{"HOME=/tmp", "TERM=" + DefaultTerm}},
+		{"append", []string{"HOME=/tmp"}, DefaultTerm, []string{"HOME=/tmp", "TERM=" + DefaultTerm}},
+		{"dedupe", []string{"TERM=a", "TERM=b", "HOME=/tmp"}, DefaultTerm, []string{"HOME=/tmp", "TERM=" + DefaultTerm}},
+		{"empty", []string{"TERM=a"}, "", []string{"TERM=a"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := WithTerm(tc.base, tc.term); !reflect.DeepEqual(got, tc.want) {
+				t.Fatalf("WithTerm = %#v, want %#v", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestRunAskPass(t *testing.T) {
 	store := &fakeStore{password: "s3cret"}
 	env := map[string]string{AskPassEnv: "1", AskPassKeyEnv: "alice@example.com:22"}

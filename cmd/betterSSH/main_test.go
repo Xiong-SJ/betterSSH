@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"betterSSH/internal/keyring"
+	"betterSSH/internal/settings"
 )
 
 func TestRunVersionAndHelp(t *testing.T) {
@@ -147,13 +148,17 @@ func runCLI(input string, args ...string) (int, string, string) {
 func TestCLIAddShowEditRemove(t *testing.T) {
 	path := setupCLIHome(t)
 
-	code, out, errOut := runCLI("", "add", "beta", "--hostname", "beta.example", "--user", "bob", "--port", "2200")
+	code, out, errOut := runCLI("", "add", "beta", "--hostname", "beta.example", "--user", "bob", "--port", "2200",
+		"--option", "Compression yes", "--option", "ForwardAgent no")
 	if code != 0 {
 		t.Fatalf("add exit=%d out=%s err=%s", code, out, errOut)
 	}
 	data, _ := os.ReadFile(path)
 	if !strings.Contains(string(data), "Host beta") || !strings.Contains(string(data), "HostName beta.example") {
 		t.Fatalf("added host missing:\n%s", data)
+	}
+	if !strings.Contains(string(data), "Compression yes") || !strings.Contains(string(data), "ForwardAgent no") {
+		t.Fatalf("extra options missing:\n%s", data)
 	}
 
 	code, out, errOut = runCLI("", "show", "alpha")
@@ -166,13 +171,13 @@ func TestCLIAddShowEditRemove(t *testing.T) {
 		}
 	}
 
-	code, out, errOut = runCLI("", "edit", "alpha", "--user", "carol", "--yes")
+	code, out, errOut = runCLI("", "edit", "alpha", "--user", "carol", "--option", "ForwardAgent yes", "--yes")
 	if code != 0 {
 		t.Fatalf("edit exit=%d out=%s err=%s", code, out, errOut)
 	}
 	data, _ = os.ReadFile(path)
-	if !strings.Contains(string(data), "User carol") || !strings.Contains(string(data), "LocalForward 8080 localhost:80") {
-		t.Fatalf("edit did not preserve unknown field:\n%s", data)
+	if !strings.Contains(string(data), "User carol") || !strings.Contains(string(data), "LocalForward 8080 localhost:80") || !strings.Contains(string(data), "ForwardAgent yes") {
+		t.Fatalf("edit did not preserve unknown field or add option:\n%s", data)
 	}
 	if _, err := os.Stat(path + ".bak"); err != nil {
 		t.Fatal("backup missing after edit")
@@ -194,6 +199,63 @@ func TestCLIAddShowEditRemove(t *testing.T) {
 	data, _ = os.ReadFile(path)
 	if strings.Contains(string(data), "Host beta") {
 		t.Fatalf("removed host still present:\n%s", data)
+	}
+}
+
+func TestCLIConnectUsesConfiguredTerm(t *testing.T) {
+	setupCLIHome(t)
+	binDir := t.TempDir()
+	termFile := filepath.Join(binDir, "term.txt")
+	script := "#!/bin/sh\n" +
+		"if [ \"$1\" = \"-V\" ]; then echo OpenSSH_9.6p1 >&2; exit 0; fi\n" +
+		"printf '%s' \"$TERM\" > \"$TERM_OUT\"\n"
+	if err := os.WriteFile(filepath.Join(binDir, "ssh"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("TERM_OUT", termFile)
+	stPath, err := settings.DefaultPath()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(stPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(stPath, []byte(`{"version":1,"term":"screen-256color"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	code, out, errOut := runCLI("", "connect", "alpha")
+	if code != 0 {
+		t.Fatalf("connect exit=%d out=%s err=%s", code, out, errOut)
+	}
+	data, err := os.ReadFile(termFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := string(data); got != "screen-256color" {
+		t.Fatalf("TERM = %q", got)
+	}
+}
+
+func TestCLIRejectsInvalidExtraOption(t *testing.T) {
+	path := setupCLIHome(t)
+	before, _ := os.ReadFile(path)
+	code, _, errOut := runCLI("", "add", "beta", "--hostname", "beta.example", "--option", "HostName other.example")
+	if code != 1 || !strings.Contains(errOut, "--option") {
+		t.Fatalf("invalid option code=%d err=%s", code, errOut)
+	}
+	after, _ := os.ReadFile(path)
+	if string(before) != string(after) {
+		t.Fatalf("config changed after invalid option:\n%s", after)
+	}
+
+	code, _, errOut = runCLI("", "add", "beta", "--hostname", "beta.example", "--option", "  ")
+	if code != 1 || !strings.Contains(errOut, "--option") {
+		t.Fatalf("empty option code=%d err=%s", code, errOut)
+	}
+	after, _ = os.ReadFile(path)
+	if string(before) != string(after) {
+		t.Fatalf("config changed after empty option:\n%s", after)
 	}
 }
 

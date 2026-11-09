@@ -29,6 +29,10 @@ const (
 	// SSH_ASKPASS_REQUIRE=force.
 	MinAskPassMajor = 8
 	MinAskPassMinor = 4
+
+	// DefaultTerm is exported to the remote side. xterm-256color enables
+	// 256-color and cursor-key sequences in common terminals.
+	DefaultTerm = "xterm-256color"
 )
 
 // Target is a resolved SSH host used to construct sshfs arguments.
@@ -126,6 +130,26 @@ func WithoutAskPass(base []string) []string {
 		out = append(out, entry)
 	}
 	return out
+}
+
+// WithTerm returns base with TERM set to term. Existing TERM entries (including
+// duplicates) are removed first; an empty term leaves base unchanged.
+func WithTerm(base []string, term string) []string {
+	if term == "" {
+		return base
+	}
+	out := make([]string, 0, len(base)+1)
+	for _, entry := range base {
+		name := entry
+		if i := strings.IndexByte(entry, '='); i >= 0 {
+			name = entry[:i]
+		}
+		if name == "TERM" {
+			continue
+		}
+		out = append(out, entry)
+	}
+	return append(out, "TERM="+term)
 }
 
 // WithAskPass returns an environment that delegates password prompts to the

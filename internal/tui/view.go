@@ -33,6 +33,8 @@ func (m *Model) View() string {
 	switch m.mode {
 	case modeHostForm:
 		return m.hostFormView()
+	case modeExtra:
+		return m.extraFormView()
 	case modeSettings:
 		return m.settingsView()
 	case modePassword:
@@ -253,19 +255,29 @@ func (m *Model) hostFormView() string {
 	b.WriteString(styleTitle.Render(title))
 	b.WriteString(styleMuted.Render("  " + displayPath(m.ConfigPath)))
 	b.WriteString("\n")
-	b.WriteString(styleMuted.Render("常用字段写回 Host 块；未知字段、注释和顺序保持不变。留空表示删除该字段。"))
+	b.WriteString(styleMuted.Render("常用字段写回 Host 块；额外配置可添加任意 OpenSSH 指令。保存后用 ssh -G 校验，未知字段、注释和顺序保持不变。"))
 	b.WriteString("\n\n")
 
 	labels := []string{
 		"Host 别名", "HostName", "User", "Port",
-		"IdentityFile", "ProxyJump", "ServerAliveInterval", "保存密码",
+		"IdentityFile", "ProxyJump", "ServerAliveInterval", "额外配置", "保存密码",
 	}
 	placeholders := []string{
 		"例如: prod-web（空格分隔可多个）", f.inherited.HostName, f.inherited.User,
 		fmt.Sprintf("%d", f.inherited.Port), f.inherited.IdentityFile, f.inherited.ProxyJump,
-		f.inherited.ServerAliveInterval, "",
+		f.inherited.ServerAliveInterval, "", "",
 	}
 	for i := 0; i < hostFieldCount; i++ {
+		if i == fieldExtra {
+			value := fmt.Sprintf("%d 条 · Enter 编辑", len(f.extras))
+			if len(f.extras) == 0 {
+				value = "无 · Enter 添加"
+			}
+			line := fmt.Sprintf("%s  %-20s %s", focusMark(i == f.focus), labels[i], value)
+			b.WriteString(styleLine(i == f.focus, line))
+			b.WriteString("\n")
+			continue
+		}
 		if i == fieldPassword {
 			check := "[ ]"
 			if f.savePassword {
@@ -295,7 +307,32 @@ func (m *Model) hostFormView() string {
 		b.WriteString("\n")
 	}
 	b.WriteString("\n")
-	b.WriteString(styleMuted.Render("Tab/↑↓ 切换 · Ctrl+S 启用密码保存 · Enter 保存 · Esc 取消"))
+	b.WriteString(styleMuted.Render("Tab/↑↓ 切换 · 额外配置行 Enter 编辑 · Ctrl+S 启用密码保存 · Enter 保存 · Esc 取消"))
+	b.WriteString("\n")
+	return b.String()
+}
+
+func (m *Model) extraFormView() string {
+	f := m.extraForm
+	if f == nil {
+		return m.hostFormView()
+	}
+	var b strings.Builder
+	b.WriteString(styleTitle.Render("额外配置"))
+	b.WriteString(styleMuted.Render("  Host " + f.alias))
+	b.WriteString("\n")
+	b.WriteString(styleMuted.Render("每行一个 OpenSSH 指令，例如 Compression yes、ForwardAgent yes、LocalForward 8080 localhost:80。"))
+	b.WriteString("\n")
+	b.WriteString(styleMuted.Render("HostName/User/Port/IdentityFile/ProxyJump/ServerAliveInterval 请用上一页字段；不支持 Host/Match 和整行注释。"))
+	b.WriteString("\n\n")
+	b.WriteString(f.editor.View())
+	b.WriteString("\n")
+	if f.err != "" {
+		b.WriteString(styleErr.Render("✗ " + f.err))
+		b.WriteString("\n")
+	}
+	b.WriteString("\n")
+	b.WriteString(styleMuted.Render("Ctrl+S 应用并返回 · Esc 取消（不修改额外配置）"))
 	b.WriteString("\n")
 	return b.String()
 }
@@ -309,11 +346,12 @@ func (m *Model) settingsView() string {
 	b.WriteString(styleTitle.Render("设置"))
 	b.WriteString(styleMuted.Render("  " + displayPath(m.SettingsPath)))
 	b.WriteString("\n")
-	b.WriteString(styleMuted.Render("仅写入工具设置，不污染 ~/.ssh/config。per-host 覆盖可在 settings.json 的 mount_points/remote_paths 中配置。"))
+	b.WriteString(styleMuted.Render("仅写入工具设置，不污染 ~/.ssh/config；TERM 会注入 ssh 进程环境。per-host 覆盖可在 settings.json 的 mount_points/remote_paths 中配置。"))
 	b.WriteString("\n\n")
 
 	b.WriteString(m.settingLine(settingMountRoot, "默认挂载根目录", f.mountRoot.View()))
 	b.WriteString(m.settingLine(settingRemotePath, "默认远程路径", f.remotePath.View()))
+	b.WriteString(m.settingLine(settingTerm, "默认 TERM", f.term.View()))
 	b.WriteString(m.settingLine(settingDefaultAction, "Enter 默认动作", settingChoice(f.draft.DefaultAction)))
 	b.WriteString(m.settingLine(settingOnMounted, "已挂载时", mountedChoice(f.draft.OnMounted)))
 	b.WriteString(m.settingLine(settingAutoUnmount, "SSH 退出后自动卸载(不询问)", checkBox(f.draft.AutoUnmount)))

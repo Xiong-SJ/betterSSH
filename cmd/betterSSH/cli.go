@@ -43,6 +43,17 @@ type hostFlagValues struct {
 	identity string
 	proxy    string
 	alive    string
+	extra    stringListFlag
+}
+
+// stringListFlag collects a repeatable command-line option.
+type stringListFlag []string
+
+func (s *stringListFlag) String() string { return strings.Join(*s, ",") }
+
+func (s *stringListFlag) Set(value string) error {
+	*s = append(*s, value)
+	return nil
 }
 
 func newCLIContext(stdin io.Reader, stdout, stderr io.Writer) (*cliContext, error) {
@@ -165,7 +176,24 @@ func registerHostFlags(fs *flag.FlagSet) *hostFlagValues {
 	fs.StringVar(&v.identity, "identity-file", "", "IdentityFile")
 	fs.StringVar(&v.proxy, "proxy-jump", "", "ProxyJump")
 	fs.StringVar(&v.alive, "server-alive", "", "ServerAliveInterval")
+	fs.Var(&v.extra, "option", "追加额外 SSH 指令，可重复，例如 --option 'Compression yes'")
 	return v
+}
+
+func (v *hostFlagValues) extraOptions() ([]config.ExtraOption, error) {
+	if len(v.extra) == 0 {
+		return nil, nil
+	}
+	for _, raw := range v.extra {
+		if strings.TrimSpace(raw) == "" {
+			return nil, errors.New("--option 不能为空")
+		}
+	}
+	opts, err := config.ParseExtraOptions(strings.Join(v.extra, "\n"))
+	if err != nil {
+		return nil, fmt.Errorf("--option 无效: %w", err)
+	}
+	return opts, nil
 }
 
 func hostInputFrom(v *hostFlagValues, alias string) config.HostInput {
@@ -279,8 +307,14 @@ func cmdAdd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	if err != nil {
 		return setupError(stderr, err)
 	}
+	extras, err := v.extraOptions()
+	if err != nil {
+		return setupError(stderr, err)
+	}
 	existed := fileExists(c.configPath)
-	if err := c.cfg.AddHost(hostInputFrom(v, alias)); err != nil {
+	in := hostInputFrom(v, alias)
+	in.Extra = extras
+	if err := c.cfg.AddHost(in); err != nil {
 		return setupError(stderr, err)
 	}
 	if err := c.cfg.Save(); err != nil {
@@ -292,6 +326,7 @@ func cmdAdd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	} else {
 		fmt.Fprintf(stdout, "配置已创建: %s\n", shortPath(c.configPath))
 	}
+	c.reportConfigCheck(stdout, stderr, alias)
 	return 0
 }
 
@@ -312,6 +347,10 @@ func cmdEdit(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return setupError(stderr, err)
 	}
 	in := config.InputFromHost(c.cfg.Hosts[idx])
+	extras, err := v.extraOptions()
+	if err != nil {
+		return setupError(stderr, err)
+	}
 	changed := false
 	fs.Visit(func(f *flag.Flag) {
 		switch f.Name {
@@ -333,13 +372,16 @@ func cmdEdit(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		case "server-alive":
 			in.ServerAliveInterval = v.alive
 			changed = true
+		case "option":
+			in.Extra = append(in.Extra, extras...)
+			changed = true
 		}
 	})
 	if !changed {
 		return setupError(stderr, errors.New("没有指定要修改的字段"))
 	}
 	if !*yes {
-		if !confirm(c.stdin, c.stdout, fmt.Sprintf("将覆盖 Host %s 的常用字段并生成 config.bak，继续?", alias)) {
+		if !confirm(c.stdin, c.stdout, fmt.Sprintf("将覆盖 Host %s 的字段与额外指令并生成 config.bak，继续?", alias)) {
 			fmt.Fprintln(stdout, "已取消")
 			return 0
 		}
@@ -352,6 +394,7 @@ func cmdEdit(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	}
 	fmt.Fprintf(stdout, "已更新 Host %s\n", alias)
 	fmt.Fprintf(stdout, "配置: %s；备份: %s\n", shortPath(c.configPath), shortPath(c.cfg.BackupPath()))
+	c.reportConfigCheck(stdout, stderr, alias)
 	return 0
 }
 
@@ -548,6 +591,7 @@ func cmdConnect(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	if warning := c.configureAskPass(cmd, target, supported); warning != "" {
 		fmt.Fprintln(stderr, "警告:", warning)
 	}
+	cmd.Env = sshutil.WithTerm(cmd.Env, c.settings.TermOrDefault())
 	cmd.Stdin = c.stdin
 	cmd.Stdout = c.stdout
 	cmd.Stderr = c.stderr
@@ -672,6 +716,24 @@ func (c *cliContext) askPassSupport() (bool, string) {
 }
 
 // configureAskPass only ever places the keyring key in the child environment.
+func (c *cliContext) reportConfigCheck(stdout, stderr io.Writer, alias string) {
+	sshPath, err := exec.LookPath("ssh")
+	if err != nil {
+		fmt.Fprintln(stderr, "提示: 未找到 ssh，跳过 OpenSSH 校验")
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := sshutil.CheckConfig(ctx, sshPath, c.configPath, alias); err != nil {
+		fmt.Fprintf(stderr, "警告: 配置已写入，但 OpenSSH 校验失败：%v\n", err)
+		if _, statErr := os.Stat(c.cfg.BackupPath()); statErr == nil {
+			fmt.Fprintf(stderr, "写前备份: %s\n", shortPath(c.cfg.BackupPath()))
+		}
+		return
+	}
+	fmt.Fprintf(stdout, "OpenSSH 校验通过（ssh -G -F %s %s）\n", shortPath(c.configPath), alias)
+}
+
 func (c *cliContext) configureAskPass(cmd *exec.Cmd, target sshutil.Target, supported bool) string {
 	cmd.Env = sshutil.WithoutAskPass(os.Environ())
 	key := keyring.Key(target.User, target.HostName, target.Port)
