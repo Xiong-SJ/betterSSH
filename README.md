@@ -32,6 +32,7 @@
 - sshfs 挂载后启动原生 `ssh <alias>`；支持严格挂载模式、已挂载处理、手动/自动卸载。
 - SSH 退出后询问“继续保留挂载 / 卸载并释放”；可通过设置自动卸载。
 - 密码只保存到系统钥匙串，连接时通过 OpenSSH AskPass 自动填充。
+- 每次 OpenSSH 发起主机密钥确认（如首次连接、known_hosts 中无记录、确认使用密钥）时，都会显示在控制终端，由用户输入 `yes`/`no`/指纹；不会自动接受。
 - 提供 TUI 和无需进入 TUI 的 CLI 子命令。
 - 设置独立保存在 `~/.config/betterSSH/settings.json`，不污染 SSH 配置。
 - 不重新实现 SSH 客户端，不使用 `sshpass`，不把密码写入 argv、环境变量、配置文件或日志。
@@ -285,7 +286,7 @@ CLI 行为说明：
 - 主界面按 `p` 直接为选中 Host 保存密码；
 - 主界面按 `x` 删除已保存密码。
 
-> 工具不会截获首次原生 `ssh` 会话中的键盘输入；首次连接前请使用上述入口保存密码。
+> 工具不会截获首次原生 `ssh` 会话中的密码输入；主机密钥确认仍会显示。首次连接前请使用上述入口保存密码。
 
 ### AskPass 机制
 
@@ -304,7 +305,12 @@ SSH_ENHANCED_ASKPASS_KEY=alice@example.com:22
 betterSSH askpass "alice@example.com's password:"
 ```
 
-隐藏的 AskPass 模式从系统钥匙串读取密码并输出到 stdout，忽略 OpenSSH 传入的提示文本；错误信息只输出通用失败原因，不包含密码。
+隐藏的 AskPass 模式分两类处理：
+
+- 普通密码提示：从系统钥匙串读取密码并只写 stdout。
+- 主机密钥/确认提示（`SSH_ASKPASS_PROMPT=confirm`，或提示文本包含 `Are you sure you want to continue connecting`、`(yes/no` 等）：**每次出现**都在控制终端 `/dev/tty` 上显示 OpenSSH 的原始提示，读取用户输入的 `yes`/`no`/指纹，只把该回答写到 stdout。没有可用控制终端时直接失败，不会自动回答 `yes`。
+
+错误信息只输出通用失败原因，不包含密码。提示文本只用于区分确认与密码，不会被当作密码来源。
 
 如果 OpenSSH 低于 8.4、AskPass 不可用或钥匙串读取失败，程序会去掉 AskPass 环境变量，回退到终端交互输入，并在界面/CLI 中提示。
 
@@ -313,6 +319,8 @@ betterSSH askpass "alice@example.com's password:"
 - 不调用 `sshpass`。
 - 密码不会出现在命令行参数、环境变量、配置文件、日志或错误信息中。
 - 密码只写入操作系统钥匙串；AskPass 将密码写 stdout，这是 OpenSSH 协议要求。
+- 主机密钥确认不会被自动接受；每次出现确认提示都在 `/dev/tty` 显示，由用户回答。
+- 主机密钥已变更时，OpenSSH 默认直接拒绝连接，通常不会弹 `yes/no` 确认；betterSSH 不会自动接受变更或改写 `known_hosts`，需要用户手动处理。
 - 已有 config 时写回前备份为 `config.bak`（权限 `0600`）。
 - 写回使用临时文件 + `rename` 原子替换；写失败不会破坏原文件。
 - 保存前比较磁盘内容，若被其他程序修改则返回 `ErrModified`，拒绝静默覆盖。
@@ -355,7 +363,7 @@ make check     # 全量检查
 
 - config 解析、注释/未知字段保留、CRLF、备份、外部修改拒绝、通配默认值解析。
 - keyring key 生成。
-- ssh/sshfs 参数、IPv6、AskPass 环境、AskPass 模式、版本解析、`TERM` 注入与 `ssh -G` 校验。
+- ssh/sshfs 参数、IPv6、AskPass 环境、AskPass 密码/主机密钥确认分流、版本解析、`TERM` 注入与 `ssh -G` 校验。
 - 额外配置的解析、校验、保留性写回，以及 TUI 编辑器与 CLI `--option`。
 - settings 默认值、持久化、`TERM` 校验与回退、挂载点计算。
 - mount 挂载表解析、安全校验、Linux 卸载回退。

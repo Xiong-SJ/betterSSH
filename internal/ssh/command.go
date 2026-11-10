@@ -24,6 +24,10 @@ const (
 	AskPassKeyEnv = "SSH_ENHANCED_ASKPASS_KEY"
 	// AskPassEnabled is the value written to AskPassEnv.
 	AskPassEnabled = "1"
+	// AskPassPromptEnv is set by OpenSSH to describe the kind of prompt
+	// ("confirm", "none", or unset). It is advisory; older releases do not
+	// set it for host-key confirmation.
+	AskPassPromptEnv = "SSH_ASKPASS_PROMPT"
 
 	// MinAskPassMajor and MinAskPassMinor are the first OpenSSH release with
 	// SSH_ASKPASS_REQUIRE=force.
@@ -115,6 +119,7 @@ func WithoutAskPass(base []string) []string {
 	remove := map[string]bool{
 		AskPassEnv:            true,
 		AskPassKeyEnv:         true,
+		AskPassPromptEnv:      true,
 		"SSH_ASKPASS":         true,
 		"SSH_ASKPASS_REQUIRE": true,
 	}
@@ -187,12 +192,31 @@ func IsAskPassMode(getenv func(string) string) bool {
 	return getenv(AskPassEnv) == AskPassEnabled
 }
 
-// RunAskPass writes the saved password for the key named by the environment.
-// Prompt text supplied by OpenSSH is intentionally ignored. The password is
-// only written to stdout, never to stderr or logs.
-func RunAskPass(getenv func(string) string, store keyring.Store, out io.Writer) error {
+// askOnTTY is replaceable in tests. It displays OpenSSH's confirmation prompt
+// on the controlling terminal and returns the user's answer.
+var askOnTTY = promptOnTTY
+
+// RunAskPass writes the saved password for the key named by the environment,
+// or lets the user answer a host-key confirmation on the controlling terminal.
+//
+// OpenSSH routes host-key "yes/no" questions through AskPass when
+// SSH_ASKPASS_REQUIRE=force is set. Returning a saved password for those
+// questions makes ssh retry forever, so confirmation prompts are shown to the
+// user on /dev/tty instead. Ordinary password prompts still come only from the
+// keyring; the prompt text is never used to choose a saved password.
+func RunAskPass(getenv func(string) string, store keyring.Store, prompt string, out io.Writer) error {
 	if !IsAskPassMode(getenv) {
 		return errors.New("not running in askpass mode")
+	}
+	if isConfirmationPrompt(prompt, getenv(AskPassPromptEnv)) {
+		answer, err := askOnTTY(prompt)
+		if err != nil {
+			return errors.New("askpass: terminal confirmation unavailable")
+		}
+		if _, err := fmt.Fprintln(out, answer); err != nil {
+			return fmt.Errorf("askpass: write confirmation: %w", err)
+		}
+		return nil
 	}
 	key := getenv(AskPassKeyEnv)
 	if strings.TrimSpace(key) == "" {
@@ -209,6 +233,23 @@ func RunAskPass(getenv func(string) string, store keyring.Store, out io.Writer) 
 		return fmt.Errorf("askpass: write password: %w", err)
 	}
 	return nil
+}
+
+// isConfirmationPrompt reports whether OpenSSH is asking the user to confirm a
+// host key (or key use) rather than requesting a secret. Host-key confirmation
+// prompts are not tagged with SSH_ASKPASS_PROMPT on all OpenSSH versions, so
+// match the stable text OpenSSH itself generates as a fallback.
+func isConfirmationPrompt(prompt, hint string) bool {
+	if strings.EqualFold(strings.TrimSpace(hint), "confirm") {
+		return true
+	}
+	lower := strings.ToLower(prompt)
+	return strings.Contains(lower, "the authenticity of host") ||
+		strings.Contains(lower, "remote host identification has changed") ||
+		strings.Contains(lower, "are you sure you want to continue connecting") ||
+		strings.Contains(lower, "please type 'yes'") ||
+		strings.Contains(lower, `please type "yes"`) ||
+		strings.Contains(lower, "yes/no")
 }
 
 // ParseSSHVersion extracts the OpenSSH version from "ssh -V" output.

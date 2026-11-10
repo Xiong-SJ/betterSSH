@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"text/tabwriter"
 	"time"
 
@@ -34,9 +35,13 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	// This check must come before flag parsing: OpenSSH passes the prompt as an
 	// argument and the helper must only print the password to stdout.
 	if sshutil.IsAskPassMode(os.Getenv) || (len(args) > 0 && args[0] == "askpass") {
-		if err := sshutil.RunAskPass(os.Getenv, passwordStore, stdout); err != nil {
+		prompt := args
+		if len(prompt) > 0 && prompt[0] == "askpass" {
+			prompt = prompt[1:]
+		}
+		if err := sshutil.RunAskPass(os.Getenv, passwordStore, strings.Join(prompt, " "), stdout); err != nil {
 			// Deliberately generic: never include keyring details or secrets.
-			fmt.Fprintln(stderr, "betterSSH askpass: saved password unavailable")
+			fmt.Fprintln(stderr, "betterSSH askpass: request failed")
 			return 1
 		}
 		return 0

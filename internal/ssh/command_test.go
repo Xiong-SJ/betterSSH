@@ -76,7 +76,7 @@ func TestBuildSSHFSVariants(t *testing.T) {
 }
 
 func TestAskPassEnvironmentHasNoPassword(t *testing.T) {
-	base := []string{"HOME=/tmp", "SSH_ASKPASS=/old", AskPassEnv + "=1", "SSH_ENHANCED_ASKPASS_KEY=old"}
+	base := []string{"HOME=/tmp", "SSH_ASKPASS=/old", AskPassEnv + "=1", "SSH_ENHANCED_ASKPASS_KEY=old", AskPassPromptEnv + "=confirm"}
 	env, err := WithAskPass(base, "/usr/local/bin/betterSSH", "alice@example.com:22")
 	if err != nil {
 		t.Fatal(err)
@@ -96,6 +96,9 @@ func TestAskPassEnvironmentHasNoPassword(t *testing.T) {
 	}
 	if strings.Count(joined, "SSH_ASKPASS=") != 1 || strings.Contains(joined, "SSH_ASKPASS=/old") {
 		t.Fatalf("old askpass was not replaced: %v", env)
+	}
+	if strings.Contains(joined, AskPassPromptEnv+"=") {
+		t.Fatalf("stale askpass prompt kind was not removed: %v", env)
 	}
 }
 
@@ -125,7 +128,7 @@ func TestRunAskPass(t *testing.T) {
 	env := map[string]string{AskPassEnv: "1", AskPassKeyEnv: "alice@example.com:22"}
 	getenv := func(k string) string { return env[k] }
 	var out bytes.Buffer
-	if err := RunAskPass(getenv, store, &out); err != nil {
+	if err := RunAskPass(getenv, store, "", &out); err != nil {
 		t.Fatal(err)
 	}
 	if out.String() != "s3cret\n" {
@@ -136,19 +139,122 @@ func TestRunAskPass(t *testing.T) {
 	}
 
 	env[AskPassKeyEnv] = ""
-	if err := RunAskPass(getenv, store, io.Discard); err == nil {
+	if err := RunAskPass(getenv, store, "", io.Discard); err == nil {
 		t.Fatal("missing key should fail")
 	}
 	delete(env, AskPassEnv)
-	if err := RunAskPass(getenv, store, io.Discard); err == nil {
+	if err := RunAskPass(getenv, store, "", io.Discard); err == nil {
 		t.Fatal("non-askpass mode should fail")
+	}
+}
+
+func TestRunAskPassShowsHostKeyConfirmation(t *testing.T) {
+	old := askOnTTY
+	defer func() { askOnTTY = old }()
+	var shown string
+	askOnTTY = func(prompt string) (string, error) {
+		shown = prompt
+		return "yes", nil
+	}
+
+	store := &fakeStore{password: "s3cret"}
+	env := map[string]string{AskPassEnv: "1", AskPassKeyEnv: "alice@example.com:22"}
+	prompt := "The authenticity of host 'example.com' can't be established.\n" +
+		"ED25519 key fingerprint is SHA256:abc.\n" +
+		"Are you sure you want to continue connecting (yes/no/[fingerprint])? "
+	var out bytes.Buffer
+	if err := RunAskPass(func(k string) string { return env[k] }, store, prompt, &out); err != nil {
+		t.Fatal(err)
+	}
+	if shown != prompt {
+		t.Fatalf("prompt = %q", shown)
+	}
+	if out.String() != "yes\n" {
+		t.Fatalf("output = %q", out.String())
+	}
+	if store.gotKey != "" {
+		t.Fatal("confirmation must not read the password store")
+	}
+}
+
+func TestRunAskPassShowsEveryConfirmation(t *testing.T) {
+	old := askOnTTY
+	defer func() { askOnTTY = old }()
+	calls := 0
+	askOnTTY = func(string) (string, error) {
+		calls++
+		return "yes", nil
+	}
+
+	store := &fakeStore{password: "s3cret"}
+	env := map[string]string{AskPassEnv: "1", AskPassKeyEnv: "alice@example.com:22"}
+	for i := 0; i < 2; i++ {
+		var out bytes.Buffer
+		if err := RunAskPass(func(k string) string { return env[k] }, store,
+			"Are you sure you want to continue connecting (yes/no/[fingerprint])? ", &out); err != nil {
+			t.Fatal(err)
+		}
+		if out.String() != "yes\n" {
+			t.Fatalf("call %d output = %q", i+1, out.String())
+		}
+	}
+	if calls != 2 {
+		t.Fatalf("confirmation prompts shown %d times, want 2", calls)
+	}
+	if store.gotKey != "" {
+		t.Fatal("confirmation must never read the password store")
+	}
+}
+
+func TestRunAskPassConfirmationNeedsTerminal(t *testing.T) {
+	old := askOnTTY
+	defer func() { askOnTTY = old }()
+	askOnTTY = func(string) (string, error) { return "", errors.New("no tty") }
+
+	store := &fakeStore{password: "s3cret"}
+	env := map[string]string{AskPassEnv: "1", AskPassKeyEnv: "alice@example.com:22"}
+	var out bytes.Buffer
+	err := RunAskPass(func(k string) string { return env[k] }, store,
+		"Are you sure you want to continue connecting (yes/no)? ", &out)
+	if err == nil {
+		t.Fatal("expected an error without a terminal")
+	}
+	if out.Len() != 0 || store.gotKey != "" {
+		t.Fatalf("confirmation failure leaked output=%q key=%q", out.String(), store.gotKey)
+	}
+}
+
+func TestIsConfirmationPrompt(t *testing.T) {
+	cases := []struct {
+		name   string
+		prompt string
+		hint   string
+		want   bool
+	}{
+		{"host key", "Are you sure you want to continue connecting (yes/no/[fingerprint])? ", "", true},
+		{"host key header", "The authenticity of host 'example.com' can't be established.", "", true},
+		{"changed key", "WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED!", "", true},
+		{"generic yes no", "Continue with this host? (yes/no): ", "", true},
+		{"yes no without parens", "Continue? yes/no: ", "", true},
+		{"host key retry", "Please type 'yes', 'no' or the fingerprint: ", "", true},
+		{"key permission", "Confirm user presence for key ED25519 SHA256:abc", "confirm", true},
+		{"password", "alice@example.com's password: ", "", false},
+		{"passphrase", "Enter passphrase for key '/home/alice/.ssh/id': ", "", false},
+		{"none hint", "Password: ", "none", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := isConfirmationPrompt(tc.prompt, tc.hint); got != tc.want {
+				t.Fatalf("isConfirmationPrompt = %v, want %v", got, tc.want)
+			}
+		})
 	}
 }
 
 func TestRunAskPassDoesNotLeakPasswordInError(t *testing.T) {
 	store := &fakeStore{err: errors.New("backend unavailable")}
 	env := map[string]string{AskPassEnv: "1", AskPassKeyEnv: "k"}
-	err := RunAskPass(func(k string) string { return env[k] }, store, io.Discard)
+	err := RunAskPass(func(k string) string { return env[k] }, store, "", io.Discard)
 	if err == nil {
 		t.Fatal("expected error")
 	}
